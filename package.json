@@ -1,0 +1,15 @@
+{
+  "name": "trolloks-forge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A GitHub-compatible git forge: git smart HTTP, REST v3, GraphQL v4 and MCP over one store, with no dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node main.ts",
+    "test": "node --test test/pkt.test.ts test/objects.test.ts test/ops.test.ts test/store.test.ts test/smart.test.ts test/api.test.ts"
+  }
+}
