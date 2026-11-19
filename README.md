@@ -16,7 +16,11 @@ npm test                     # 42 unit and HTTP tests (node:test)
 ```
 
 Environment: `MAKEFUN_SHOP_TOKEN` (the bearer token every request must carry; unset means every request is 401),
-`MAKEFUN_ENV_URL` (the suite's origin), `FORGE_DATA_DIR` (the store, default `/tmp/makefun-forge`).
+`MAKEFUN_ENV_URL` (the suite's origin), `FORGE_DATA_DIR` (the store; optional).
+
+Storage: when `FORGE_DATA_DIR` is unset, `main.ts` creates a unique temporary directory for the run
+(`/tmp/makefun-forge-XXXXXX`) and removes it after the listener has closed, on success and on registration or
+other startup errors. When `FORGE_DATA_DIR` is set, the forge uses that directory and never removes it.
 
 ## What is implemented
 
@@ -67,5 +71,8 @@ first request, `GET /api/v3/user` answers 404 and a repository created earlier r
 - Packs the forge sends contain whole objects only (no deltas), which every client accepts.
 - No push certificates, atomic pushes, LFS, forks, reviews, webhooks, OAuth or GitHub Apps. `rebase` merges
   are refused (422). GraphQL covers the documents gh and github-mcp-server send, not the whole schema.
-- The store lives under `FORGE_DATA_DIR`. A run that starts on an old store finds its repositories already
-  present, so each trial needs a fresh data directory.
+- Each run gets its own store unless `FORGE_DATA_DIR` names one, so a run never inherits another run's
+  repositories. Reusing an explicit `FORGE_DATA_DIR` across runs does carry its repositories over, so the
+  suite's fixed repository names will then collide; give each suite run a fresh directory.
+- A termination signal (SIGTERM or SIGKILL) ends the process without running the cleanup, which leaves the
+  temporary store behind. The trial exits through `/done`, which runs the cleanup.

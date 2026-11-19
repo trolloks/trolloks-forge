@@ -1,10 +1,13 @@
 // The entry <-> env lifecycle, as env/src/wire.ts settles it: bind an ephemeral port, tell the env the
-// port it bound, then poll until the env says the trial is over and exit 0. Keep this file as it is:
-// the suite scores the server app.ts builds, and the lifecycle is the harness's, not the contest's.
+// port it bound, then poll until the env says the trial is over and exit 0. The suite scores the server
+// app.ts builds; this file owns the lifecycle and the store the trial's forge writes to.
 //
 //   1. MAKEFUN_ENV_URL names the env's origin (http://store:8080 in a trial container). Without it
 //      there is nothing to talk to, so the program exits 1 at once.
 //   2. Create the server and listen(0): the kernel picks a free port. Never bind 8080 — the env owns it.
+//      The store is FORGE_DATA_DIR when it is set. When it is not, this trial makes a unique temporary
+//      directory of its own, so two runs on one machine (process-mode live and replay, say) never share
+//      repositories; that directory is removed on exit, after the listener has closed.
 //   3. POST $MAKEFUN_ENV_URL/register {"port": N}. The env records the address the request came from
 //      plus N as your base URL and dials it from then on. The first register wins; a 409 means another
 //      entry already registered, and this process keeps waiting like any other.
@@ -16,6 +19,10 @@
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import type { Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createApp } from './app.ts';
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
@@ -76,22 +83,60 @@ async function waitForDone(): Promise<void> {
   }
 }
 
+/**
+ * The store this process created, or null when FORGE_DATA_DIR named one (which is never removed). Set in
+ * main() before createApp() reads the environment, so the forge opens exactly this directory.
+ */
+let ownedStoreDir: string | null = null;
+
+/** Point the forge at a store: the explicit FORGE_DATA_DIR, else a fresh unique temporary directory. */
+function prepareStore(): void {
+  const explicit = process.env.FORGE_DATA_DIR;
+  if (explicit !== undefined && explicit !== '') return;
+  ownedStoreDir = mkdtempSync(join(tmpdir(), 'makefun-forge-'));
+  process.env.FORGE_DATA_DIR = ownedStoreDir;
+}
+
+/** Close the listener and wait until it has stopped accepting and its connections are gone. */
+function closeServer(server: Server | null): Promise<void> {
+  if (server === null || !server.listening) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    server.closeAllConnections();
+    server.close(() => resolve());
+  });
+}
+
+/** Remove the store this process created. Only ever the directory prepareStore() made. */
+function removeOwnedStore(): void {
+  if (ownedStoreDir === null) return;
+  rmSync(ownedStoreDir, { recursive: true, force: true });
+  ownedStoreDir = null;
+}
+
 /** Bound the port, register it, then wait for the env: the whole life of the process. */
 async function main(): Promise<void> {
-  const server = createApp();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, () => resolve());
-  });
-  const address = server.address();
-  if (address === null || typeof address === 'string') throw new Error('the server did not bind an ephemeral TCP port');
-  process.stdout.write(`[entry] listening on port ${address.port}\n`);
+  let server: Server | null = null;
+  try {
+    prepareStore();
+    const listener = createApp();
+    server = listener;
+    await new Promise<void>((resolve, reject) => {
+      listener.once('error', reject);
+      listener.listen(0, () => resolve());
+    });
+    const address = listener.address();
+    if (address === null || typeof address === 'string') throw new Error('the server did not bind an ephemeral TCP port');
+    process.stdout.write(`[entry] listening on port ${address.port}\n`);
 
-  await register(address.port);
-  process.stdout.write('[entry] registered; waiting for the env to say done\n');
+    await register(address.port);
+    process.stdout.write('[entry] registered; waiting for the env to say done\n');
 
-  await waitForDone();
-  server.close();
+    await waitForDone();
+  } finally {
+    // Stop the listener before the store it writes to goes away, on success and on every failure.
+    await closeServer(server);
+    removeOwnedStore();
+  }
   process.stdout.write('[entry] done\n');
 }
 
